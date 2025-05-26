@@ -1,0 +1,695 @@
+---
+title: "STA 518 Final Project"
+author: "Binju Karki, Nour Gaboussa & Sam Kiel"
+format:
+  html:
+    self-contained: true
+    embed-resources: true
+error: true
+execute: 
+  warning: false
+  message: false
+  eval: true
+---
+## Overview
+
+In this project we will look at state census data and state presidential election data. When looking at the two together, data is from 2008-2016. Overall census data is from 2008 to 2023 (excluding 2020). Overall election data is from 1976 to 2020. When discussing whether or not a party won a state, won is referring to having a greater number of votes, comparatively. 
+
+`state_census` data pulled from GitHub (dilernia, STA 418-518) who gathered it from the `tidycensus` R package and the United States Census website.
+
+`state_election` data pulled from GitHub (dilernia, STA 418-518) who gathered it from MIT Election Data and Science Lab. The reference is below:
+
+MIT Election Data and Science Lab, 2017, “U.S. President 1976–2020”, https://doi.org/10.7910/DVN/42MVDX, Harvard Dataverse, V6, UNF:6:4KoNz9KgTkXy0ZBxJ9ZkOw== [fileUNF]
+
+## Importing packages
+
+```{r}
+#| message: false
+
+library(tidyverse)
+library(skimr)
+library(knitr)
+library(janitor)
+library(ggplot2)
+library(dplyr)
+library(stringr)
+library(flextable)
+library(ggpubr)
+library(lubridate)
+library(leaflet)
+library(maps)
+```
+
+## Looking at the Data
+
+### loading the state census and state election data
+
+```{r}
+# loading the state census data - tidycensus R package and the United States Census website
+state_census <- read.csv("https://raw.githubusercontent.com/dilernia/STA418-518/main/Data/census_data_state_2008-2023.csv")
+
+# loading the state election data - MIT Election Data and Science Lab, 2017, “U.S. President 1976–2020”, https://doi.org/10.7910/DVN/42MVDX, Harvard Dataverse, V6, UNF:6:4KoNz9KgTkXy0ZBxJ9ZkOw== [fileUNF]
+state_election <- read.csv("https://raw.githubusercontent.com/dilernia/STA418-518/main/Data/1976-2020-president.csv")
+```
+
+### Missing values - state census data
+
+```{r}
+#| output: false
+skim(state_census)
+```
+
+
+There are no missing values that we need to be concerned with.
+
+
+### Missing values - state election data
+
+```{r}
+#| output: false
+
+skim(state_election)
+```
+
+There are a few `writein` missing values; however, we are not concerned as there are only a small number (3/4287). Every observation is missing the `notes` feature, so we will not use this in our analysis. It appears that some of the values of the `candidate` and `party_detailed` are blank but are not counted as missing. With a quick look, these observations have "OTHER" listed in `party_simiplified`. On a quick glance, these observations also appear to have a lower number in their `candidatevotes` compared to other parties.
+
+
+### Merging the data
+
+```{r}
+
+# addressing inconsistencies between data sets in character data
+
+state_census <- state_census |>
+  mutate(county_state = str_to_lower(county_state))
+
+state_election <- state_election |>
+  mutate(state = str_to_lower(state))
+
+# joining the data
+
+data <- inner_join(state_census, state_election, by = c("county_state" = "state",
+                                                        "year" = "year"))
+```
+
+### Missing values - merged data
+
+```{r}
+skim(data)
+```
+
+We used an inner join so that all of our observations would have data from both data sets. This substantially decreased our number of observations so that we are only able to compare 3 election years. The only missing value in our observations is in the `notes` feature, which we will not use. Again, with a quick look, these observations have "OTHER" listed in `party_simiplified`. On a quick glance, these observations also appear to have a lower number in their `candidatevotes` compared to other parties.
+
+
+### Data Dictionary - merged data
+
+| Variable | Description | Type |
+|----------|-------------|------|
+|`geoid` | geographical id | integer |
+| `county_state` | State name (lowercase) | character |
+| `year` | Year of observation | integer |
+| `population` | Total state population | integer |
+| `median_income` | Median household income in USD | integer |
+| `median_monthly_rent_cost` | Median monthly rent in USD | integer |
+| `median_monthly_home_cost` | Median monthly home cost in USD | integer |
+| `prop_female`, `prop_male` | Proportion of female/male population | double |
+| `prop_white`, `prop_black`, `prop_hispanic`, etc. | Proportion by race/ethnicity | double |
+| `prop_highschool`, `prop_bachelors`, etc. | Proportion by education level | double |
+| `prop_poverty` | Proportion of individuals below poverty line | double |
+| `state_po` | State postal code | character |
+| `state_fips` | State FIPS code | integer |
+| `state_cen` | State census code | integer |
+| `state_ic` | State IC code | integer |
+| `office` | Election office information | character |
+| `candidate` | Candidate name | character |
+| `party_detailed` | detailed party affiliation | character|
+| `writein` | Candidate write, true or false | logical |
+| `candidatevotes` | Votes for candidate | integer |
+| `totalvotes` | Total state-level votes | integer |
+| `version` | Version  | integer |
+| `notes` |  Notes  | logical | 
+| `party_simplified` | Simplified party affiliation | character |
+
+## Summary Statistics
+
+```{r}
+data <- data |>
+  mutate(party_clean = str_replace_all(party_simplified, "[^A-Za-z]", ""),
+         party_clean = str_to_title(party_clean))
+
+# adding in a feature for income bracket. which will be used later
+data <- data |>
+  mutate(income_bracket = case_when(
+    median_income <= 40000 ~ "< $40K",
+    median_income <= 60000 & median_income > 40000 ~ "$40k–$59K",
+    median_income <= 80000 & median_income > 60000 ~ "$60K–$79K",
+    median_income > 80000 ~ "$80K+",
+    TRUE ~ "Unknown"
+  ))
+
+```
+
+```{r}
+# Reference: https://ardata-fr.github.io/flextable-book/header-and-footer.html
+# Reference: https://stackoverflow.com/questions/60507139/adding-title-to-the-table-with-flextable-and-officer-library
+
+# creating a data frame that gives the state_election information for the party with the most votes in that state & year
+highest_by_state_year <- data |>
+  group_by(year, county_state) |>
+  filter(candidatevotes == max(candidatevotes))
+
+# looking at the average median income and standard deviation median income for the above data frame 
+highest_by_state_year |>
+  group_by("party" = party_clean) |>
+  summarise("mean" = round(mean(median_income), 2),
+            "standard deviation" = round(sd(median_income), 2),
+            "number of observations" = length(median_income)) |>
+  flextable() |>
+  add_header_lines("Table 1: Summary Statistics of Median Income by Party When the Party Won the State") |>
+  add_footer_lines("Data source: tidycensus R package, United States Census & MIT Election Data and Science Lab") |>
+  theme_vanilla()
+```
+
+```{r}
+#Reference: https://stackoverflow.com/questions/49500569/using-regular-expressions-in-r-to-grab-numbers-from-a-string
+
+# changing year to a character string value so that it doesn't display with a comma
+data <- data |>
+  mutate(year = make_date(year = year),
+         year = str_remove_all(year, pattern = "-01-01"))
+         
+# summarizing the mean and median total votes by the year for 2008-2016
+vote_summary <- data |>
+  group_by(year) |>
+  summarise(mean_votes = round(mean(totalvotes), 0),
+            median_votes = median(totalvotes),
+            .groups = "drop")
+  
+vote_summary |>
+  flextable() |>
+  add_header_lines("Table 2: Average and Median State Total Votes by Election Year") |>
+  add_footer_lines("Data source: MIT Election Data and Science Lab") |>
+  theme_vanilla()
+```
+
+
+```{r}
+# summarizing the average vote share for each income bracket and party
+vote_share_summary <- data |>
+  mutate(vote_share = candidatevotes / totalvotes) |>
+  group_by("party" = party_clean, "income bracket" = income_bracket) |>
+  summarise(
+    "vote share (average)" = round(mean(vote_share, na.rm = TRUE), 3),
+    "n elections" = n(),
+    .groups = "drop"
+  )
+
+  vote_share_summary |>
+  flextable() |>
+  add_header_lines("Table 3: Average Party Vote Share by Party and Income Bracket") |>
+  add_footer_lines("Data source: tidycensus R package, United States Census & MIT Election Data and Science Lab") |>
+  theme_vanilla()
+```
+
+```{r}
+state_election <- state_election |>
+  mutate(election_decade = floor_date(ymd(paste0(year, "-01-01")), unit = "10 years"),
+         election_decade = str_remove_all(election_decade, pattern = "-01-01"))
+# Summarize total votes per party and decade
+decade_summary <- state_election |>
+  filter(party_simplified %in% c("REPUBLICAN", "DEMOCRAT"), !(election_decade %in% c("1970-01-01", "2020-01-01"))) |>
+  group_by(election_decade, party_simplified) |>
+  summarise(
+    total_votes = sum(candidatevotes, na.rm = TRUE),
+    .groups = "drop"
+  )
+flextable(decade_summary) |>
+  add_header_lines("Table 4: Total Presidential Candidate Votes by Decade for 1980s-2010s") |>
+  add_footer_lines("Data source: MIT Election Data and Science Lab") |>
+  theme_vanilla()
+```
+
+
+```{r}
+# Reference: https://www.reddit.com/r/rstats/comments/6sx3t7/stringr_str_replace_all_and_blank_inputs/
+
+# Clean candidate names and extract last names
+data <- data |>
+  mutate(candidate_clean = str_to_title(str_trim(candidate)) ,
+         candidate_last = word(candidate_clean, 1),
+         candidate_last = str_remove_all(candidate_last, ",")) # extract last name
+
+# Group summary: top last names and total votes
+last_name_summary <- data |>
+  group_by(year, candidate_last) |>
+  summarise(
+    total_votes = sum(candidatevotes, na.rm = TRUE),
+    mean_votes = mean(candidatevotes),
+    median_votes = median(candidatevotes),
+    .groups = "drop") |>
+  arrange(desc(total_votes)) |>
+  slice_head(n = 5)
+
+last_name_summary |>
+  flextable() |>
+  add_header_lines("Table 5: Top 5 Candidate First Names by Total Votes") |>
+  add_footer_lines("Data source: MIT Election Data and Science Lab") |>
+  theme_vanilla()
+```
+
+
+
+```{r}
+# Reference: https://davidgohel.github.io/flextable/reference/width.html
+
+# mean proportion of votes to the total population for Michigan for elections from 2008 to 2016 by party
+data <- data |>
+  mutate(prop_votes_to_population = candidatevotes / population)
+
+data |>
+  filter(county_state == "michigan") |>
+  group_by("Party" = party_clean) |>
+  summarise("Proportion of population (average)" = mean(prop_votes_to_population)) |>
+  flextable() |>
+  width(width = 2) |>
+  add_header_lines("Table 6: Average proportion of votes to the total population for Michigan from 2008 - 2016 by Party") |>
+  add_footer_lines("Data source: tidycensus R package, United States Census & MIT Election Data and Science Lab") |>
+  theme_vanilla()
+```
+
+## Data Visualizations
+
+```{r}
+
+# summarizing the census data for bachelors degree and higher for the parties that won the states
+education_summary <- highest_by_state_year |>
+  group_by(party_clean) |>
+  summarise(mean_prop_college = round(mean(prop_bachelors + prop_masters + prop_doctoral + prop_professional), 2))
+
+# plotting the above data frame
+education_summary |>
+  ggplot(aes(x = party_clean, y = mean_prop_college,
+             fill = party_clean)) +
+  geom_col() +
+  labs(title = "Education statistics when a party won the state from 2008-2016",
+       x = "Party", y = "Proportion Bachelors degree or higher (Average)",
+       caption = "Data source: tidycensus R package, United States Census & MIT Election Data and Science Lab") +
+  scale_y_continuous(expand = expansion(mult = c(0,0.1))) +
+  scale_fill_viridis_d() +
+  theme_minimal(base_size = 10) +
+  theme(legend.position = 'none')
+```
+
+The above visualization shows states where the democratic party has had more votes have a higher proportion of those 25 years and older who have a bachelors degree or higher. 
+
+```{r}
+# density plot for median monthly rent costs when a party won a state from 2008-2016
+highest_by_state_year |>
+  filter(party_clean %in% c("Democrat", "Republican")) |>
+  ggplot(aes(x = median_monthly_rent_cost, fill = party_clean)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Density of Median Monthly Rent When the Party Wins the State from 2008-2016",
+       x = "Monthly Rent (USD)", y = "Density",
+       caption = "Data source: tidycensus R package, United States Census & MIT Election Data and Science Lab") +
+  scale_fill_viridis_d() +
+  theme_minimal(base_size = 10)
+```
+
+The above visualization shows that the median monthly rent appears to be higher in states where the democratic party has had more votes than the republican party.
+
+```{r}
+ggplot(decade_summary, aes(x = election_decade, y = total_votes, fill = party_simplified)) +
+  geom_col(position = "stack") +
+  labs(
+    title = "Total Presidential Candidate Votes by Decade",
+    x = "Election Decade",
+    y = "Total Votes",
+    fill = "Party",
+  caption = "Data Source: MIT Election Data and Science Lab") +
+  scale_y_continuous(expand = expansion(mult = c(0,0.1))) +
+  scale_fill_viridis_d() +
+  theme_minimal()
+  
+```
+
+The above visualization shows the difference in total number of votes for presidential elections in decades from the 80s to 2010s. 2000 appears to have the highest number of votes. However, there was one more election in the 80s and 2000s than the 90s and 2010s. Both parties appear to have roughly the same number of votes as well.
+
+```{r}
+highest_by_state_year |>
+  group_by(party_clean) |>
+  count(income_bracket) |>
+  ggplot(aes(x = income_bracket, y = party_clean, fill = n)) +
+  geom_tile(color = "white") +
+  labs(
+    title = "State Win Count in 2008-2016 Elections",
+    x = "Median Income Bracket",
+    y = "Party",
+    fill = "Count",
+    caption = "Data source: tidycensus R package, United States Census & MIT Election Data and Science Lab"
+  ) +
+  theme_minimal()
+```
+
+The above visualization shows the counts of median income brackets in states where the democratic party or republican party had more votes for that election. The republican party had the most wins in the 40k-59k income bracket, while the democratic party had no wins with a median income less than 40k.
+
+```{r}
+#
+data |>
+  ggplot(aes(x = median_income, y = median_monthly_home_cost)) +
+  geom_point(alpha = 0.6, color = "darkorange") +
+  geom_smooth(method = "lm", se = FALSE, color = "steelblue") +
+  stat_regline_equation(
+    aes(label = ..eq.label..),
+    label.y = max(data$median_monthly_home_cost, na.rm = TRUE) * 0.95,
+    output.type = "expression",
+    formula = y ~ x
+  ) +
+  labs(
+    title = "Median Income vs. Median Monthly Home Cost, 2008-2016",
+    x = "Median Income (USD)",
+    y = "Monthly Home Cost (USD)",
+    caption = "Data source: tidycensus R package & United States Census"
+  ) +
+  theme_minimal()
+```
+The above visualization shows what appears to be a moderate positive relationship between median income and monthly home costs from 2008 to 2016.  
+
+```{r}
+# box plot showing distributions of of median incomes when a party wins a state
+highest_by_state_year |>
+  group_by(party_clean) |>
+  ggplot(aes(x = party_clean, y = median_income )) +
+  geom_boxplot(fill = "#ffc107", outlier.color = "red", outlier.size = 1) +
+  labs(
+    title = "Median Income by Party When the Party Won the State",
+    x = "Party",
+    y = "Median Income",
+    caption = "Data source: tidycensus R package, United States Census & MIT Election Data and Science Lab"
+  ) +
+  theme_minimal()
+
+```
+
+The above visualization shows information about the median income for the democratic and republican parties using state data from when that party had a higher number of votes than other parties. The distribution of median income appears to be generally higher for the democratic party. The republican party did have a few outliers on the higher side of the median incomes.
+
+#### Map showing state voting participation percentages and winning party 
+Data source: `state.center` data set from `datasets` R package, tidycensus R package, United States Census & MIT Election Data and Science Lab
+
+```{r}
+#| message: false
+
+# Reference: https://rstudio.github.io/leaflet/articles/widget.html
+# Reference: https://rstudio.github.io/leaflet/articles/leaflet.html
+# Reference: https://rstudio.github.io/leaflet/articles/markers.html
+# Reference:https://stringr.tidyverse.org/reference/str_glue.html
+
+# state lat and long info into a usuable data frame
+stateinfo <- data.frame(state.center)
+
+state_names <- data.frame(unique(data$county_state))
+
+state_names <- state_names |>
+  mutate(state = unique.data.county_state.) |>
+  select(state) |>
+  filter(!(state == "district of columbia"))
+
+stateinfo <- stateinfo |>
+  mutate(state = state_names$state)
+
+# extracting information needed from census and election information
+voting_map <- highest_by_state_year |>
+  filter(!(county_state == "district of columbia"), year == 2008) |>
+  group_by(county_state, party_clean) |>
+  mutate(prop_votes_to_population = totalvotes / population)
+
+#joining voting information with state location information
+voting_map <- left_join(stateinfo, voting_map, by = c("state" = "county_state"))
+
+voting_map <- voting_map |>
+  mutate(longitude = x,
+         latitude = y)
+
+# creating leaflet visualization
+pal <-  colorFactor(c("navy", "red"), domain = c("Democrat", "Republican"))
+  
+leaflet(voting_map) |>
+  addTiles() |>
+    addCircleMarkers(label = str_glue("{str_to_title(voting_map$state)}", ": ", "{100 * round(voting_map$prop_votes_to_population, 2)}", "%"),
+                     color = ~pal(voting_map$party_clean),
+                     radius = (voting_map$prop_votes_to_population) * 30,
+                     fillOpacity = (voting_map$prop_votes_to_population))
+
+
+```
+
+The above visualization shows what party had the most votes for the state in 2008 (red = republican, blue = democratic). Hovering over the circle markers shows the percentage of the population in the state who participated in the presidential election. The size of the circle markers also changes with the percentage.
+
+## Monte Carlo Methods of Inference
+
+### Permutation Test/Randomization Test
+
+$$ H_0: \mu_{\text{R}} = \mu_{\text{D}} $$
+$$ H_0: \mu_{\text{R}} \neq \mu_{\text{D}} $$
+
+where $\mu_{\text{R}}$ is the average proportion of those 25 and older in the state where the Republican party won (most votes) in the presidential election, and $\mu_{\text{D}}$ is the average proportion of those 25 and older in the state where the Democratic party won (most votes) in the presidential election.
+
+```{r}
+# gathering trial data
+trial_data <- highest_by_state_year |>
+  ungroup() |>
+  mutate(bach_higher = prop_bachelors + prop_masters + prop_doctoral + prop_professional) |>
+  select(party_clean, bach_higher)
+
+# density plots
+highest_by_state_year |>
+  group_by(party_clean) |>
+  ggplot(aes(x = prop_bachelors + prop_masters + prop_doctoral + prop_professional,
+             fill = party_clean)) +
+  geom_density(color = "black", alpha = 0.6) +
+  scale_fill_viridis_d() +
+  facet_grid(party_clean ~ .) +
+    labs(x = "Proportion Bachelors or Higher when a Party Wins a State",
+         title = "Empirical density curve",
+         y = "Density") +
+  theme(legend.position = "none")
+
+# Calculating standard deviations and variances for each group
+highest_by_state_year |> 
+  group_by(party_clean) |> 
+  summarize(Mean = mean(prop_bachelors + prop_masters + prop_doctoral + prop_professional),
+            n = n(),
+            SD = sd(prop_bachelors + prop_masters + prop_doctoral + prop_professional),
+            Variance = var(prop_bachelors + prop_masters + prop_doctoral + prop_professional)) |> 
+  flextable() |> 
+  colformat_double(digits = 3) |> 
+  autofit()
+
+```
+
+
+Distributions for each group do not appear normal and variances are very close so we will continue with the permutation test.
+
+```{r}
+set.seed(123)
+# Reorder factor levels
+trial_data <- trial_data |> 
+  dplyr::mutate(party_clean = fct_relevel(party_clean, "Republican", "Democrat"))
+
+# Two-sample t-test
+ttest_result <- t.test(formula = bach_higher ~ party_clean,
+                       data = trial_data,
+                       alternative = "two.sided")
+
+# Number of permutations to do
+n_permutations <- 5000
+
+# Instantiating vector for test statistics
+permutation_statistics <- vector(length = n_permutations)
+
+# Calculating t-test statistic for each permutation
+for(p in 1:n_permutations) {
+  permutation_statistics[p] <- t.test(formula = bach_higher ~ party_clean,
+                                      alternative = "two.sided",
+                                      data = trial_data |> 
+    mutate(party_clean = sample(party_clean, replace = FALSE))) |> 
+    broom::tidy() |> 
+    pull(statistic)
+}
+
+```
+
+```{r}
+janitor::tabyl(permutation_statistics > ttest_result$statistic) |>
+  flextable()
+```
+
+```{r}
+#| message: false
+
+tidy_statistics <- tibble(value = permutation_statistics)
+
+tidy_statistics |>
+  ggplot(aes(x = value)) +
+  geom_histogram(aes(y = after_stat(density)),color = "white") +
+  geom_density(color = "turquoise", linewidth = 1) +
+  stat_function(fun = function(x) dt(x, df = ttest_result$parameter),
+                color = "violet", linewidth = 1) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+  geom_vline(xintercept = quantile(permutation_statistics, probs = 0.025),
+             color = "red") +
+  geom_vline(xintercept = quantile(permutation_statistics, probs = 0.975),
+             color = "red") +
+  labs(title = "Distribution of Permutation Test") +
+  theme_minimal()
+```
+
+**Decision**: At the 5% significance level, we reject $H_0$, since 0 < 0.05.
+
+**Interpretation in context**: We have sufficient evidence at the 5% significance level that the average proportion of those 25 and older in the state where the Republican party won (most votes) in the presidential election differs from the average proportion of those 25 and older in the state where the Democratic party won (most votes) in the presidential election.
+
+
+```{r}
+# median income difference between two parties Democrats vs. Republicans — using a permutation test
+
+# Filtering to just Democrat and Republican entries with available income
+perm_data <- data |>
+  filter(party_clean %in% c("Democrat", "Republican")) |>
+  select(party_clean, median_income)
+
+# Observed difference in means
+obs_diff <- perm_data |>
+  group_by(party_clean) |>
+  summarise(mean_income = mean(median_income), .groups = "drop") |>
+  summarise(diff = diff(mean_income)) |>
+  pull(diff)
+
+```
+
+```{r}
+# Permutation test setup
+set.seed(123)
+B <- 5000  # Number of permutations
+
+perm_diffs <- replicate(B, {
+  shuffled_party <- sample(perm_data$party_clean)
+  permuted <- perm_data |>
+    mutate(party_perm = shuffled_party) |>
+    group_by(party_perm) |>
+    summarise(mean_income = mean(median_income), .groups = "drop") |>
+    summarise(diff = diff(mean_income)) |>
+    pull(diff)
+})
+
+# p-value (two-sided)
+p_val <- mean(abs(perm_diffs) >= abs(obs_diff))
+
+# Print results
+cat("Observed difference in mean income:", round(obs_diff, 2), "\n")
+cat("Permutation test p-value:", round(p_val, 4), "\n")
+```
+
+```{r}
+tibble(perm_diffs = perm_diffs) |>
+  ggplot(aes(x = perm_diffs)) +
+  geom_histogram(fill = "lightblue", bins = 50, color = "white") +
+  geom_vline(xintercept = obs_diff, color = "red", linetype = "dashed", size = 1) +
+  geom_vline(xintercept = -obs_diff, color = "red", linetype = "dashed", size = 1) +
+  labs(
+    title = "Permutation Test: Difference in Mean Median Income",
+    subtitle = paste0("Observed diff = ", round(obs_diff, 2), ", p-value = ", round(p_val, 4)),
+    x = "Permuted Difference in Means",
+    y = "Frequency",
+    caption = "Dashed lines = Observed difference",
+  ) +
+  theme_minimal()
+```
+
+### Bootstrapping
+
+```{r}
+##Bootstrap Code Sample
+#interpreting a nonparametric 95% confidence interval for the population median
+
+set.seed(123)  # For reproducibility
+
+
+income_data <- state_census |>
+  filter(!is.na(median_income)) |>
+  pull(median_income)
+
+# Number of bootstrap samples
+B <- 10000
+
+# Bootstrap resampling
+boot_medians <- replicate(B, {
+  sample(income_data, size = length(income_data), replace = TRUE) |>
+    median(na.rm = TRUE)
+})
+
+# Estimate standard error and 95% CI
+boot_se <- sd(boot_medians)
+boot_ci <- quantile(boot_medians, probs = c(0.025, 0.975))
+
+# Show results
+cat("Bootstrap Standard Error:", round(boot_se, 2), "\n")
+cat("95% Bootstrap Confidence Interval for Median Income:", round(boot_ci[1], 2), "to", round(boot_ci[2], 2), "\n")
+
+
+#the median of the median incomes is around $55,500.
+#Based on 10,000 bootstrap samples, true median lies between ~$55.6k and ~$57.5K with 95% confidence.
+```
+
+```{r}
+tibble(median_income = boot_medians) |>
+  ggplot(aes(x = median_income)) +
+  geom_histogram(fill = "skyblue", color = "white", bins = 40) +
+  geom_vline(xintercept = boot_ci, color = "red", linetype = "dashed") +
+  labs(
+    title = "Bootstrap Distribution of Median Income",
+    x = "Bootstrap Median Income",
+    y = "Frequency",
+    caption = "Dashed lines show 95% CI"
+  ) +
+  theme_minimal()
+```
+
+## Conclusions
+
+From our visualizations there appears to be a difference in the median income of states who win different parties. There also appears to be a difference in the proportion of those 25 and older who have a bachelor's degree or higher. The randomization test above validates the latter idea as it found there was a difference. However, the p-value of 0 leaves us suspiious that there may be an error in the test. Additionally, we found that the 95% Bootstrap Confidence Interval for overall median income was between 55606.88 to 57588 for census data from 2008 to 2023 (excluding 2020). 
+
+We also found that Obama had the most amount of votes for his prospective year. Lastly, our tile plot shows that a majority of Republican won states from 2008-2016 were in the 40k–59K income bracket, while the Democratic party won zero states with a median income less than 40k from 2008 to 2016.
+
+## Contributions of Each Group Member
+
+### Nour 
+- part of the summary statistics
+- part of the visualizations
+- data dictionary
+
+### Binju
+
+- part of the visualizations
+- permutation test
+- bootstrapping
+
+### Sam
+
+- one table, one visualization, leaflet
+- editing of some tables, some visualizations, and data dictionary
+- permutation test
+- conclusions
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
